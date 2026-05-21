@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Local extraction output and temporary VMA files
+*_extracted/
+.vma_extract_*.vma
+*.tmp
+
+# Tooling and OS noise
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
