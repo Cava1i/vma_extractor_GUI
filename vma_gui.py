@@ -38,6 +38,8 @@ CONVERTED_FORMATS = {
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 GZIP_MAGIC = b"\x1f\x8b"
 LZOP_MAGIC = b"\x89LZO\x00\r\n\x1a\n"
+MAX_QUEUE_EVENTS_PER_TICK = 80
+MAX_LOG_CHARS_PER_TICK = 20000
 
 
 class QueueWriter(io.TextIOBase):
@@ -531,11 +533,15 @@ class VmaExtractorApp(tk.Tk):
         return f"{raw_path}{extension}"
 
     def _drain_queue(self):
+        events = 0
+        log_chars = 0
         try:
-            while True:
+            while events < MAX_QUEUE_EVENTS_PER_TICK and log_chars < MAX_LOG_CHARS_PER_TICK:
                 event, payload = self.output_queue.get_nowait()
+                events += 1
                 if event == "log":
                     self._append_log(payload)
+                    log_chars += len(payload)
                 elif event == "done":
                     self._append_log(f"\n{payload}\n")
                     self.status_var.set(payload)
@@ -548,7 +554,8 @@ class VmaExtractorApp(tk.Tk):
                     messagebox.showerror("提取失败", "详情请查看日志。")
         except queue.Empty:
             pass
-        self.after(100, self._drain_queue)
+        delay = 20 if events else 100
+        self.after(delay, self._drain_queue)
 
     def _append_log(self, text):
         self.log_text.configure(state=tk.NORMAL)

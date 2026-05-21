@@ -8,6 +8,37 @@ import argparse
 
 OUTPUT_FORMAT_ORIGINAL = 'original'
 OUTPUT_FORMAT_RAW = 'raw'
+ZERO_BLOCK_SIZE = 4096
+
+
+def enable_sparse_file(fo):
+    if os.name != 'nt':
+        return False
+
+    try:
+        import ctypes
+        import msvcrt
+    except ImportError:
+        return False
+
+    fsctl_set_sparse = 0x000900C4
+    bytes_returned = ctypes.c_ulong(0)
+    handle = msvcrt.get_osfhandle(fo.fileno())
+    return bool(ctypes.windll.kernel32.DeviceIoControl(
+        handle,
+        fsctl_set_sparse,
+        None,
+        0,
+        None,
+        0,
+        ctypes.byref(bytes_returned),
+        None,
+    ))
+
+
+def skip_zeroes(fo, size):
+    if size > 0:
+        fo.seek(size, os.SEEK_CUR)
 
 
 def device_output_name(device_name, output_format=OUTPUT_FORMAT_ORIGINAL):
@@ -272,18 +303,23 @@ def extract(fo, args):
     # so we can easily append data to arbitrary devices
     device_fos = {}
     device_paths = {}
+    device_sizes = {}
     for dev_id, dev_info in enumerate(vma_header.dev_info):
         if dev_info.device_size > 0:
             device_name = dev_info.get_name()
             device_path = os.path.join(args.destination, device_output_name(device_name, output_format))
             if args.verbose: print(os.path.basename(device_path))
             device_paths[dev_id] = device_path
+            device_sizes[dev_id] = dev_info.device_size
             device_fos[dev_id] = open(device_path, 'wb')
+            enable_sparse_file(device_fos[dev_id])
 
     if args.verbose: print('这可能需要一些时间...')
 
     # used for sanity checking
     cluster_num_prev = -1
+    non_sequential_count = 0
+    skipped_zero_bytes = 0
 
     while(fo.tell() < filesize):
         # when there is data to read at this point, we can safely expect a full
@@ -303,7 +339,7 @@ def extract(fo, args):
 
             # non-sequential clusters encountered, handle this case
             if blockinfo.cluster_num != cluster_num_prev + 1:
-                if args.verbose: print('发现非连续簇...')
+                non_sequential_count += 1
 
                 cluster_pos = blockinfo.cluster_num * Blockinfo.CLUSTER_SIZE
                 if blockinfo.cluster_num > cluster_num_prev:
@@ -314,17 +350,9 @@ def extract(fo, args):
                     written_size = device_fo.tell()
 
                     if written_size < cluster_pos:
-                        # add padding for missing clusters
-                        if args.verbose:
-                            print(f'{blockinfo.cluster_num}')
-                            print(f'补零 {cluster_pos - written_size} 字节...')
-
-                        # write padding in chucks of 4096 bytes to avoid
-                        # memory errors
-                        padding = cluster_pos - written_size
-                        while padding > 0:
-                            device_fo.write(b'\0' * min(padding, 4096))
-                            padding -= 4096
+                        skipped = cluster_pos - written_size
+                        skipped_zero_bytes += skipped
+                        skip_zeroes(device_fo, skipped)
 
                 # seek to start of new cluster
                 device_fo.seek(cluster_pos, os.SEEK_SET)
@@ -334,12 +362,17 @@ def extract(fo, args):
             for i in range(16):
                 # a 2-bytes wide bitmask indicates 4k blocks with only zeros
                 if (1 << i) & blockinfo.mask:
-                    device_fo.write(fo.read(4096))
+                    device_fo.write(fo.read(ZERO_BLOCK_SIZE))
                 else:
-                    device_fo.write(b'\0' * 4096)
+                    skip_zeroes(device_fo, ZERO_BLOCK_SIZE)
+
+    if args.verbose and non_sequential_count:
+        skipped_gib = skipped_zero_bytes / 1024 / 1024 / 1024
+        print(f'发现 {non_sequential_count} 个非连续簇，跳过零填充 {skipped_gib:.2f} GiB。')
 
     if args.verbose: print('正在关闭文件句柄...')
-    for device_fo in device_fos.values():
+    for dev_id, device_fo in device_fos.items():
+        device_fo.truncate(device_sizes[dev_id])
         device_fo.close()
 
     if args.verbose: print('完成')
